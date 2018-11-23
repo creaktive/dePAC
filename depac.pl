@@ -15,7 +15,7 @@ my $je = JE->new;
 
 # shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
 sub validIP {
-    $_[0] =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/x
+    $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
         && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255;
 }
 $je->new_function(dnsDomainIs => sub {
@@ -28,7 +28,7 @@ $je->new_function(dnsDomainIs => sub {
 });
 $je->new_function(dnsDomainLevels => sub {
     $memoize{ join('|', __LINE__, @_) } //= do {
-        $#{[ split('.', $_[0]) ]};
+        $#{[ split m{\.}x, $_[0] ]};
     };
 });
 $je->new_function(dnsResolve => sub {
@@ -72,20 +72,27 @@ $je->new_function(shExpMatch => sub {
     };
 });
 
-my $wpad = URI->new('http://wpad.' . Net::Domain::hostdomain);
-$wpad->path('/wpad.dat');
-
-AE::log info => 'fetching %s', $wpad;
+my @hostdomain = split m{\.}x, Net::Domain::hostdomain;
 my $cv = AnyEvent->condvar;
-http_get $wpad->canonical->as_string => sub {
-    my ($body, $hdr) = @_;
-    if (($hdr->{Status} != 200) || !length($body)) {
-        AE::log fatal => "couldn't GET %s", $wpad;
-    }
-    $cv->send($body);
-};
-AE::log debug => 'evaluating %s', $wpad;
-$je->eval($cv->recv);
+my $w = AnyEvent->timer(after => 1.0, cb => sub { $cv->send });
+while ($#hostdomain) {
+    my $wpad = URI->new('http://wpad.' . join('.', @hostdomain));
+    $wpad->path('/wpad.dat');
+    AE::log info => 'fetching %s', $wpad;
+    http_get $wpad->canonical->as_string => sub {
+        my ($body, $hdr) = @_;
+        if (($hdr->{Status} != 200) || !length($body)) {
+            AE::log info => "couldn't GET %s", $wpad;
+        } else {
+            AE::log info => 'evaluating %s', $wpad;
+            $cv->send($body);
+        }
+    };
+    shift @hostdomain;
+}
+my $body = $cv->recv;
+AE::log fatal => "COULDN'T FIND WPAD" unless $body;
+$je->eval($body);
 
 AE::log info => 'STARTING THE SERVER';
 my %pool;

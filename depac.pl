@@ -5,10 +5,10 @@ use warnings qw(all);
 
 use AnyEvent::HTTP;
 use AnyEvent::Socket;
+use IO::Socket;
 use JE;
 use Net::Domain;
 use URI;
-
 
 my %memoize;
 my $je = JE->new;

@@ -15,7 +15,6 @@ my $bind_host   = '127.0.0.1';
 my $bind_port   = 0;
 my $hostdomain  = Net::Domain::hostdomain;
 my $exports     = 1;
-
 newdaemon(
     progname                => 'depac',
     pidfile                 => "$ENV{HOME}/.depac.pid",
@@ -36,15 +35,16 @@ sub gd_flags_more {
     );
 }
 
-sub gd_run {
+# shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
+sub _validIP {
+    $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
+        && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255;
+}
+
+sub _process_wpad {
     my %memoize;
     my $je = JE->new;
 
-    # shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
-    sub validIP {
-        $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
-            && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255;
-    }
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
             my $host_len = length $_[0];
@@ -66,8 +66,8 @@ sub gd_run {
     });
     $je->new_function(isInNet => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            $_[0] = dnsResolve($_[0]) unless validIP($_[0]);
-            (!$_[0] || !validIP($_[1]) || !validIP($_[2]))
+            $_[0] = dnsResolve($_[0]) unless _validIP($_[0]);
+            (!$_[0] || !_validIP($_[1]) || !_validIP($_[2]))
                 ? () : (inet_aton($_[0]) & inet_aton($_[2])) eq (inet_aton($_[1]) & inet_aton($_[2]));
         };
     });
@@ -122,12 +122,16 @@ sub gd_run {
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
     $je->eval($body);
 
+    return $je;
+}
+
+sub gd_run {
+    my ($self) = @_;
     my %pool;
     my $w;
     $w = AnyEvent->signal(signal => 'INT', cb => sub {
         AE::log info => 'Shutting down...';
         %pool = ();
-        undef $t;
         undef $w;
         exit;
     });
@@ -170,7 +174,7 @@ sub gd_run {
             }
 
             # my $proxy = 'DIRECT';
-            my $proxy = $je->{FindProxyForURL}->(
+            my $proxy = $self->{je}->{FindProxyForURL}->(
                 ($verb eq 'CONNECT' ? 'https' : 'http') . '://' . $peer_host, # HACK!
                 $peer_host,
             );
@@ -234,21 +238,26 @@ sub gd_run {
     }, sub {
         my ($fh, $this_host, $this_port) = @_;
         AE::log info => 'STARTING THE SERVER AT %s:%d', $this_host, $this_port;
-        return unless $exports;
-        my $proxy = URI->new('http://' . $this_host);
-        $proxy->port($this_port);
-        say qq(export $_="$proxy") for map { $_ => uc } qw(http_proxy https_proxy);
-        say qq(export $_="localhost,127.0.0.1") for map { $_ => uc } qw(no_proxy);
     };
     AnyEvent->condvar->wait;
 }
 
-sub gd_daemonize {
+sub gd_preconfig {
     my ($self) = @_;
-    my $pid;
-    POSIX::_exit(0) if $pid = fork;
-    AE::log fatal => "Couldn't fork: $!" unless defined $pid;
-    POSIX::setsid();
+    return () if $self->{do} eq 'stop';
+    $self->{je} = _process_wpad();
+    unless ($bind_port) {
+        $bind_port = IO::Socket::INET->new(
+            LocalAddr       => $bind_host,
+            Proto           => 'tcp',
+        )->sockport;
+    }
+    return () unless $exports;
+    my $proxy = URI->new('http://' . $bind_host);
+    $proxy->port($bind_port);
+    say qq(export $_="$proxy") for map { $_ => uc } qw(http_proxy https_proxy);
+    say qq(export $_="localhost,127.0.0.1") for map { $_ => uc } qw(no_proxy);
+    return ();
 }
 
 sub gd_kill {

@@ -9,19 +9,67 @@ use JE;
 use Net::Domain;
 use URI;
 
+
+my %memoize;
 my $je = JE->new;
+
+# shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
+sub validIP {
+    $_[0] =~ /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/x
+        && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255;
+}
 $je->new_function(dnsDomainIs => sub {
-    my $host_len = length $_[0];
-    my $domain_len = length $_[1];
-    my $d = length($_[0]) - length($_[1]);
-    return ($d >= 0) && (substr($_[0], $d) eq $_[1]);
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        my $host_len = length $_[0];
+        my $domain_len = length $_[1];
+        my $d = length($_[0]) - length($_[1]);
+        ($d >= 0) && (substr($_[0], $d) eq $_[1]);
+    };
+});
+$je->new_function(dnsDomainLevels => sub {
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        $#{[ split('.', $_[0]) ]};
+    };
+});
+$je->new_function(dnsResolve => sub {
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        my $addr = inet_aton($_[0]);
+        $addr ? inet_ntoa($addr) : ();
+    };
+});
+$je->new_function(isInNet => sub {
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        $_[0] = dnsResolve($_[0]) unless validIP($_[0]);
+        (!$_[0] || !validIP($_[1]) || !validIP($_[2]))
+            ? () : (inet_aton($_[0]) & inet_aton($_[2])) eq (inet_aton($_[1]) & inet_aton($_[2]));
+    };
 });
 $je->new_function(isPlainHostName => sub {
-    return index($_[0], '.') == -1;
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        index($_[0], '.') == -1;
+    };
+});
+$je->new_function(isResolvable => sub {
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        defined(gethostbyname($_[0]));
+    };
+});
+$je->new_function(localHostOrDomainIs => sub {
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        ($_[0] eq $_[1]) || rindex($_[1], $_[0] . '.') == 0;
+    };
+});
+$je->new_function(myIpAddress => sub {
+    $memoize{myIpAddress} //= do {
+        my $addr = inet_aton(Net::Domain::hostname);
+        $addr ? inet_ntoa($addr) : '127.0.0.1';
+    };
 });
 $je->new_function(shExpMatch => sub {
-    $_[1] =~ s{ \* }{.*?}gx;
-    return !!($_[0] =~ m{$_[1]}ix);
+    $memoize{ join('|', __LINE__, @_) } //= do {
+        $_[1] =~ s{ \* }{.*?}gx;
+        !!($_[0] =~ m{$_[1]}ix);
+    };
 });
 
 my $wpad = URI->new('http://wpad.' . Net::Domain::hostdomain);

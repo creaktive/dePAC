@@ -14,7 +14,6 @@ use URI;
 my $bind_host   = '127.0.0.1';
 my $bind_port   = 0;
 my $hostdomain  = Net::Domain::hostdomain;
-my $exports     = 1;
 newdaemon(
     progname                => 'depac',
     pidfile                 => "$ENV{HOME}/.depac.pid",
@@ -22,7 +21,6 @@ newdaemon(
         'bind_host=s'       => \$bind_host,
         'bind_port=i'       => \$bind_port,
         'hostdomain=s'      => \$hostdomain,
-        'exports!'          => \$exports,
     },
 );
 
@@ -31,7 +29,6 @@ sub gd_flags_more {
         '--bind_host ADDR'  => 'Accept connection at this host address (default: 127.0.0.1)',
         '--bind_port PORT'  => 'Accept connection at this port (default: random port)',
         '--hostdomain HOST' => 'Something like "pc.department.branch.example.com", should be discovered automatically',
-        '--noexports'       => 'Do not print the export/unset statements',
     );
 }
 
@@ -125,6 +122,28 @@ sub _process_wpad {
     return $je;
 }
 
+sub _ping_pid {
+    my ($proxy) = @_;
+    my $cv = AnyEvent->condvar;
+    my $url = URI->new($proxy);
+    $url->path('/pid');
+    AE::log info => 'pinging %s', $url;
+    http_get $url->canonical->as_string,
+        proxy   => undef,
+        timeout => 1.0,
+        sub {
+            my ($body, $hdr) = @_;
+            if (($hdr->{Status} != 200) || !length($body)) {
+                AE::log info => "couldn't GET %s", $url;
+                $cv->send(0);
+            } else {
+                chomp $body;
+                $cv->send($body);
+            }
+        };
+    return $cv->recv;
+}
+
 sub gd_run {
     my ($self) = @_;
     my %pool;
@@ -155,11 +174,22 @@ sub gd_run {
             AE::log debug => '[from %s:%d] %s', $host, $port, $line;
             my $url;
             my ($verb, $peer_host, $peer_port, $proto);
-            if ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(https?://.+)\s+(HTTP/1\.[01])$}ix) {
+            if ($line =~ m{^CONNECT\s+([\w\.\-]+):([0-9]+)\s+(HTTP/1\.[01])$}ix) {
+                ($verb, $peer_host, $peer_port, $proto) = ('CONNECT', $1, $2, $3);
+            } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(https?://.+)\s+(HTTP/1\.[01])$}ix) {
                 $url = URI->new($2);
                 ($verb, $peer_host, $peer_port, $proto) = (uc($1), $url->host, $url->port, $3);
-            } elsif ($line =~ m{^CONNECT\s+([\w\.\-]+):([0-9]+)\s+(HTTP/1\.[01])$}ix) {
-                ($verb, $peer_host, $peer_port, $proto) = ('CONNECT', $1, $2, $3);
+            } elsif ($line =~ m{^GET\s+/pid\s+HTTP/1\.[01]$}ix) {
+                AE::log info => 'status request from %s:%d', $host, $port;
+                $_h->push_write(
+                    'HTTP/1.0 200 OK' . $eol .
+                    'Cache-Control: no-cache' . $eol .
+                    'Connection: close' . $eol .
+                    'Content-Type: text/plain' . $eol . $eol .
+                    $$ . $eol
+                );
+                $_h->push_shutdown;
+                return;
             } else {
                 AE::log error => 'bad request from %s:%d', $host, $port;
                 $_h->push_write(
@@ -244,25 +274,55 @@ sub gd_run {
 
 sub gd_preconfig {
     my ($self) = @_;
-    return () if $self->{do} eq 'stop';
-    $self->{je} = _process_wpad();
-    unless ($bind_port) {
-        $bind_port = IO::Socket::INET->new(
-            LocalAddr       => $bind_host,
-            Proto           => 'tcp',
-        )->sockport;
+    if ($self->{do} =~ /^(start|debug)$/x) {
+        my $envfile = $self->{gd_pidfile};
+        $envfile =~ s/\.pid$//ix;
+        $envfile .= '.env';
+        if (-e $envfile) {
+            AE::log debug => 'checking previous environment at %s', $envfile;
+            open(my $fh, '<', $envfile)
+                || AE::log fatal => "can't read from %s: %s", $envfile, $!;
+            my $proxy;
+            my @env;
+            while (my $line = <$fh>) {
+                $proxy = $1 if $line =~ m{^export\s+https?_proxy="(http://[\w\.\-]+:[0-9]+)"}isx;
+                push @env => $line;
+            }
+            close $fh;
+            AE::log fatal => "couldn't find running process address in %s", $envfile
+                unless $proxy;
+            if (my $pid = _ping_pid($proxy)) {
+                AE::log info => 'running proxy has PID %d', $pid;
+                print for @env;
+                exit;
+            }
+        }
+
+        $self->{je} = _process_wpad();
+        unless ($bind_port) {
+            $bind_port = IO::Socket::INET->new(
+                LocalAddr       => $bind_host,
+                Proto           => 'tcp',
+            )->sockport;
+        }
+        my $proxy = URI->new('http://' . $bind_host);
+        $proxy->port($bind_port);
+
+        AE::log info => 'writing environment proxy settings to %s', $envfile;
+        my @env;
+        push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
+        push @env => qq(export $_="localhost,127.0.0.1"\n) for map { $_ => uc } qw(no_proxy);
+        print for @env;
+        open(my $fh, '>', $envfile)
+            || AE::log fatal => "can't write to %s: %s", $envfile, $!;
+        print $fh $_ for @env;
+        close $fh;
     }
-    return () unless $exports;
-    my $proxy = URI->new('http://' . $bind_host);
-    $proxy->port($bind_port);
-    say qq(export $_="$proxy") for map { $_ => uc } qw(http_proxy https_proxy);
-    say qq(export $_="localhost,127.0.0.1") for map { $_ => uc } qw(no_proxy);
     return ();
 }
 
 sub gd_kill {
     my ($self, $pid) = @_;
     kill INT => $pid;
-    return unless $exports;
-    say qq(unset $_) for map { $_ => uc } qw(http_proxy https_proxy no_proxy);
+    print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy no_proxy);
 }

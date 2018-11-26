@@ -13,29 +13,29 @@ use URI;
 
 my $bind_host   = '127.0.0.1';
 my $bind_port   = 0;
-my $hostdomain  = Net::Domain::hostdomain;
+my $wpad_file;
 newdaemon(
     progname                => 'depac',
     pidfile                 => "$ENV{HOME}/.depac.pid",
     options                 => {
-        'bind_host=s'       => \$bind_host,
-        'bind_port=i'       => \$bind_port,
-        'hostdomain=s'      => \$hostdomain,
+        'bindhost=s'        => \$bind_host,
+        'bindport=i'        => \$bind_port,
+        'wpadfile=s'        => \$wpad_file,
     },
 );
 
 sub gd_flags_more {
-    +(
-        '--bind_host ADDR'  => 'Accept connection at this host address (default: 127.0.0.1)',
-        '--bind_port PORT'  => 'Accept connection at this port (default: random port)',
-        '--hostdomain HOST' => 'Something like "pc.department.branch.example.com", should be discovered automatically',
+    return (
+        '--bindhost ADDR'   => 'Accept connection at this host address (default: 127.0.0.1)',
+        '--bindport PORT'   => 'Accept connection at this port (default: random port)',
+        '--wpadfile URL'    => 'Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)',
     );
 }
 
 # shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
 sub _validIP {
-    $_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
-        && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255;
+    return ($_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
+        && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255);
 }
 
 sub _process_wpad {
@@ -96,24 +96,36 @@ sub _process_wpad {
         };
     });
 
-    AE::log info => 'searching domain %s', $hostdomain;
-    my @hostdomain = split m{\.}x, $hostdomain;
     my $cv = AnyEvent->condvar;
     my $t = AnyEvent->timer(after => 1.0, cb => sub { $cv->send });
-    while ($#hostdomain) {
-        my $wpad = URI->new('http://wpad.' . join('.', @hostdomain));
-        $wpad->path('/wpad.dat');
-        AE::log info => 'fetching %s', $wpad;
-        http_get $wpad->canonical->as_string => sub {
+    if ($wpad_file) {
+        AE::log info => 'fetching %s', $wpad_file;
+        http_get $wpad_file => sub {
             my ($body, $hdr) = @_;
             if (($hdr->{Status} != 200) || !length($body)) {
-                AE::log info => "couldn't GET %s", $wpad;
+                AE::log fatal => "couldn't GET %s", $wpad_file;
             } else {
-                AE::log info => 'evaluating %s', $wpad;
                 $cv->send($body);
             }
         };
-        shift @hostdomain;
+    } else {
+        my $hostdomain  = Net::Domain::hostdomain;
+        AE::log info => 'searching domain %s', $hostdomain;
+        my @hostdomain = split m{\.}x, $hostdomain;
+        while ($#hostdomain) {
+            my $wpad = URI->new('http://wpad.' . join('.', @hostdomain));
+            $wpad->path('/wpad.dat');
+            AE::log info => 'fetching %s', $wpad;
+            http_get $wpad->canonical->as_string => sub {
+                my ($body, $hdr) = @_;
+                if (($hdr->{Status} != 200) || !length($body)) {
+                    AE::log info => "couldn't GET %s", $wpad;
+                } else {
+                    $cv->send($body);
+                }
+            };
+            shift @hostdomain;
+        }
     }
     my $body = $cv->recv;
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
@@ -270,6 +282,7 @@ sub gd_run {
         AE::log info => 'STARTING THE SERVER AT %s:%d', $this_host, $this_port;
     };
     AnyEvent->condvar->wait;
+    return;
 }
 
 sub gd_preconfig {
@@ -325,4 +338,5 @@ sub gd_kill {
     my ($self, $pid) = @_;
     kill INT => $pid;
     print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy no_proxy);
+    return;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env perl
-use 5.010001;
+use 5.010;
 use strict;
 use warnings qw(all);
 
@@ -35,7 +35,7 @@ sub _validIP {
 
 sub _process_wpad {
     my ($wpad_file) = @_;
-    return () if $wpad_file eq 'skip';
+    return () if $wpad_file && $wpad_file eq 'skip';
     my %memoize;
     my $je = JE->new;
     $je->new_function(dnsDomainIs => sub {

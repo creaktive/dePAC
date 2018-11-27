@@ -5,31 +5,13 @@ use warnings qw(all);
 
 use AnyEvent::HTTP;
 use AnyEvent::Socket;
-use Daemon::Generic;
+use Getopt::Long;
 use IO::Socket;
 use JE;
 use Net::Domain;
+use POSIX;
 
-my $bind_host   = '127.0.0.1';
-my $bind_port   = 0;
-my $wpad_file;
-newdaemon(
-    progname                => 'depac',
-    pidfile                 => "$ENV{HOME}/.depac.pid",
-    options                 => {
-        'bindhost=s'        => \$bind_host,
-        'bindport=i'        => \$bind_port,
-        'wpadfile=s'        => \$wpad_file,
-    },
-);
-
-sub gd_flags_more {
-    return (
-        '--bindhost ADDR'   => 'Accept connection at this host address (default: 127.0.0.1)',
-        '--bindport PORT'   => 'Accept connection at this port (default: random port)',
-        '--wpadfile URL'    => 'Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)',
-    );
-}
+main();
 
 # shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
 sub _validIP {
@@ -38,6 +20,7 @@ sub _validIP {
 }
 
 sub _process_wpad {
+    my ($wpad_file) = @_;
     my %memoize;
     my $je = JE->new;
 
@@ -99,14 +82,16 @@ sub _process_wpad {
     my $t = AnyEvent->timer(after => 1.0, cb => sub { $cv->send });
     if ($wpad_file) {
         AE::log info => 'fetching %s', $wpad_file;
-        http_get $wpad_file => sub {
-            my ($body, $hdr) = @_;
-            if (($hdr->{Status} != 200) || !length($body)) {
-                AE::log fatal => "couldn't GET %s", $wpad_file;
-            } else {
-                $cv->send($body);
-            }
-        };
+        http_get $wpad_file,
+            proxy => undef,
+            sub {
+                my ($body, $hdr) = @_;
+                if (($hdr->{Status} != 200) || !length($body)) {
+                    AE::log fatal => "couldn't GET %s", $wpad_file;
+                } else {
+                    $cv->send($body);
+                }
+            };
     } else {
         my $hostdomain  = Net::Domain::hostdomain;
         AE::log info => 'searching domain %s', $hostdomain;
@@ -114,20 +99,23 @@ sub _process_wpad {
         while ($#hostdomain) {
             my $wpad = 'http://wpad.' . join('.', @hostdomain) . '/wpad.dat';
             AE::log info => 'fetching %s', $wpad;
-            http_get $wpad => sub {
-                my ($body, $hdr) = @_;
-                if (($hdr->{Status} != 200) || !length($body)) {
-                    AE::log info => "couldn't GET %s", $wpad;
-                } else {
-                    $cv->send($body);
-                }
-            };
+            http_get $wpad,
+                proxy => undef,
+                sub {
+                    my ($body, $hdr) = @_;
+                    if (($hdr->{Status} != 200) || !length($body)) {
+                        AE::log info => "couldn't GET %s", $wpad;
+                    } else {
+                        $cv->send($body);
+                    }
+                };
             shift @hostdomain;
         }
     }
     my $body = $cv->recv;
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
     $je->eval($body);
+    AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
 
     return $je;
 }
@@ -137,7 +125,7 @@ sub _ping_pid {
     $url .= '/pid';
     my $cv = AnyEvent->condvar;
     AE::log info => 'pinging %s', $url;
-    http_get $url->canonical->as_string,
+    http_get $url,
         proxy   => undef,
         timeout => 1.0,
         sub {
@@ -153,15 +141,16 @@ sub _ping_pid {
     return $cv->recv;
 }
 
-sub gd_run {
-    my ($self) = @_;
+sub run {
+    my ($bind_host, $bind_port, $je, $cb) = @_;
+    my $cv = AnyEvent->condvar;
     my %pool;
     my $w;
     $w = AnyEvent->signal(signal => 'INT', cb => sub {
-        AE::log info => 'Shutting down...';
+        AE::log info => 'shutting down...';
         %pool = ();
         undef $w;
-        exit;
+        $cv->send;
     });
     tcp_server $bind_host, $bind_port, sub {
         my ($fh, $host, $port) = @_;
@@ -186,7 +175,7 @@ sub gd_run {
             if ($line =~ m{^CONNECT\s+([\w\.\-]+):([0-9]+)\s+(HTTP/1\.[01])$}ix) {
                 ($verb, $peer_host, $peer_port, $proto) = ('CONNECT', $1, $2, $3);
             } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(?:https?)://([\w\.\-]+)(?::([0-9]+))?\S*\s+(HTTP/1\.[01])$}ix) {
-                ($verb, $peer_port, $peer_port, $proto) = (uc($1), $2, $3, $4);
+                ($verb, $peer_host, $peer_port, $proto) = (uc($1), $2, $3, $4);
             } elsif ($line =~ m{^GET\s+/pid\s+HTTP/1\.[01]$}ix) {
                 AE::log info => 'status request from %s:%d', $host, $port;
                 $_h->push_write(
@@ -197,6 +186,7 @@ sub gd_run {
                     $$ . $eol
                 );
                 $_h->push_shutdown;
+                delete $pool{ fileno($fh) };
                 return;
             } else {
                 AE::log error => 'bad request from %s:%d', $host, $port;
@@ -208,11 +198,11 @@ sub gd_run {
                     '<html><body><h1>400 Bad request</h1></body></html>'
                 );
                 $_h->push_shutdown;
+                delete $pool{ fileno($fh) };
                 return;
             }
 
-            # my $proxy = 'DIRECT';
-            my $proxy = $self->{je}->{FindProxyForURL}->(
+            my $proxy = $je->{FindProxyForURL}->(
                 ($verb eq 'CONNECT' ? 'https' : 'http') . '://' . $peer_host, # HACK!
                 $peer_host,
             );
@@ -273,65 +263,84 @@ sub gd_run {
                 );
             }
         });
-    }, sub {
-        my ($fh, $this_host, $this_port) = @_;
-        AE::log info => 'STARTING THE SERVER AT %s:%d', $this_host, $this_port;
-    };
-    AnyEvent->condvar->wait;
-    return;
+    }, $cb;
+    return $cv;
 }
 
-sub gd_preconfig {
-    my ($self) = @_;
-    if ($self->{do} =~ /^(start|debug)$/x) {
-        my $envfile = $self->{gd_pidfile};
-        $envfile =~ s/\.pid$//ix;
-        $envfile .= '.env';
-        if (-e $envfile) {
-            AE::log debug => 'checking previous environment at %s', $envfile;
-            open(my $fh, '<', $envfile)
-                || AE::log fatal => "can't read from %s: %s", $envfile, $!;
-            my $proxy;
-            my @env;
-            while (my $line = <$fh>) {
-                $proxy = $1 if $line =~ m{^export\s+https?_proxy="(http://[\w\.\-]+:[0-9]+)"}isx;
-                push @env => $line;
-            }
-            close $fh;
-            AE::log fatal => "couldn't find running process address in %s", $envfile
-                unless $proxy;
-            if (my $pid = _ping_pid($proxy)) {
-                AE::log info => 'running proxy has PID %d', $pid;
-                print for @env;
-                exit;
-            }
-        }
+sub _daemonize {
+    open(\*STDOUT, '>', '/dev/null') || AE::log fatal => "open >/dev/null: $@";
+    open(\*STDIN,  '<', '/dev/null') || AE::log fatal => "open </dev/null: $@";
+    open(\*STDERR, '>', '/dev/null') || AE::log fatal => "dup stdout > stderr: $@";
+    my $pid;
+    POSIX::_exit(0) if $pid = fork;
+    AE::log fatal => "couldn't fork: $@" unless defined $pid;
+    POSIX::setsid();
+}
 
-        $self->{je} = _process_wpad();
-        unless ($bind_port) {
-            $bind_port = IO::Socket::INET->new(
-                LocalAddr       => $bind_host,
-                Proto           => 'tcp',
-            )->sockport;
-        }
-        my $proxy = 'http://' . $bind_host . ':' $bind_port;
+sub _help {
+    print q(Usage: depac [options]
+    --bind_host ADDR     Accept connection at this host address (default: 127.0.0.1)
+    --bind_port PORT     Accept connection at this port (default: random port)
+    --wpad_file URL      Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
+);
+}
 
-        AE::log info => 'writing environment proxy settings to %s', $envfile;
+sub main {
+    my $bind_host = '127.0.0.1';
+    my $env_file = $ENV{HOME} . '/.depac.env';
+    my $detach = 1;
+    my ($bind_port, $wpad_file, $help, $stop);
+    GetOptions(
+        'bind_host=s'   => \$bind_host,
+        'bind_port=i'   => \$bind_port,
+        'detach!'       => \$detach,
+        'env_file=s'    => \$env_file,
+        'help'          => \$help,
+        'stop'          => \$stop,
+        'wpad_file=s'   => \$wpad_file,
+    );
+    _help && exit if $help;
+
+    my $proxy;
+    if (-e $env_file) {
+        AE::log debug => 'checking previous environment at %s', $env_file;
+        open(my $fh, '<', $env_file)
+            || AE::log fatal => "can't read from %s: %s", $env_file, $@;
         my @env;
+        while (my $line = <$fh>) {
+            $proxy = $1 if $line =~ m{^export\s+https?_proxy="(http://[\w\.\-]+:[0-9]+)"}isx;
+            push @env => $line;
+        }
+        close $fh;
+        AE::log fatal => "couldn't find running process address in %s", $env_file
+            unless $proxy;
+        if (my $pid = _ping_pid($proxy)) {
+            AE::log info => 'running proxy has PID %d', $pid;
+            if ($stop) {
+                kill INT => $pid;
+            } else {
+                print for @env;
+            }
+            exit;
+        }
+    }
+
+    my $je = _process_wpad($wpad_file);
+    my $cv = run($bind_host, $bind_port, $je, sub {
+        my (undef, $this_host, $this_port) = @_;
+        my @env;
+        AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;
+        $proxy = 'http://' . $this_host . ':' . $this_port;
+        AE::log info => 'writing environment proxy settings to %s', $env_file;
         push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
         push @env => qq(export $_="localhost,127.0.0.1"\n) for map { $_ => uc } qw(no_proxy);
         print for @env;
-        open(my $fh, '>', $envfile)
-            || AE::log fatal => "can't write to %s: %s", $envfile, $!;
+        open(my $fh, '>', $env_file)
+            || AE::log fatal => "can't write to %s: %s", $env_file, $@;
         print $fh $_ for @env;
         close $fh;
-    }
-    return ();
-}
-
-sub gd_kill {
-    my ($self, $pid) = @_;
-    kill INT => $pid;
-    print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy no_proxy);
-    return;
+        _daemonize if $detach;
+    });
+    $cv->recv;
+    exit;
 }

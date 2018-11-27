@@ -19,11 +19,20 @@ Usage: depac [options]
     --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
     --bind_port PORT    Accept connection at this port (default: random port)
     --wpad_file URL     Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
-                        Alternatively: --wpad_file=skip to short-circuit the proxy relay
+                        Alternatively: --wpad_file=skip to short-circuit the relay proxy
     --env_file FILE     File for environment persistence (default: ~/.depac.env)
     --nodetach          Do not daemonize
     --help              This screen
     --stop              Guess what
+
+ * Add this line to your ~/.profile file to start the relay proxy in background
+   and update HTTP_PROXY environment variables appropriately:
+
+    eval $(depac)
+
+ * To gracefully terminate the relay proxy and unset HTTP_PROXY environment:
+
+    eval $(depac --stop)
 END_HELP
 }
 

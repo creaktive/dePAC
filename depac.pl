@@ -13,6 +13,20 @@ use POSIX;
 
 main();
 
+sub _help {
+    return print <<'END_HELP';
+Usage: depac [options]
+    --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
+    --bind_port PORT    Accept connection at this port (default: random port)
+    --wpad_file URL     Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
+                        Alternatively: --wpad_file=skip to short-circuit the proxy relay
+    --env_file FILE     File for environment persistence (default: ~/.depac.env)
+    --nodetach          Do not daemonize
+    --help              This screen
+    --stop              Guess what
+END_HELP
+}
+
 # shamelessly stolen from https://metacpan.org/source/MACKENNA/HTTP-ProxyPAC-0.31/lib/HTTP/ProxyPAC/Functions.pm
 sub _validIP {
     return ($_[0] =~ m{^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$}x
@@ -21,9 +35,9 @@ sub _validIP {
 
 sub _process_wpad {
     my ($wpad_file) = @_;
+    return () if $wpad_file eq 'skip';
     my %memoize;
     my $je = JE->new;
-
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
             my $host_len = length $_[0];
@@ -77,7 +91,6 @@ sub _process_wpad {
             !!($_[0] =~ m{$_[1]}ix);
         };
     });
-
     my $cv = AnyEvent->condvar;
     my $t = AnyEvent->timer(after => 1.0, cb => sub { $cv->send });
     if ($wpad_file) {
@@ -121,17 +134,16 @@ sub _process_wpad {
 }
 
 sub _ping_pid {
-    my ($url) = @_;
-    $url .= '/pid';
+    my ($proxy) = @_;
     my $cv = AnyEvent->condvar;
-    AE::log info => 'pinging %s', $url;
-    http_get $url,
-        proxy   => undef,
+    AE::log info => 'pinging %s:%d', @$proxy;
+    http_get 'http://depac/pid',
+        proxy   => $proxy,
         timeout => 1.0,
         sub {
             my ($body, $hdr) = @_;
             if (($hdr->{Status} != 200) || !length($body)) {
-                AE::log info => "couldn't GET %s", $url;
+                AE::log info => "couldn't GET /pid from %s:%d", @$proxy;
                 $cv->send(0);
             } else {
                 chomp $body;
@@ -144,7 +156,7 @@ sub _ping_pid {
 sub run {
     my ($bind_host, $bind_port, $je, $cb) = @_;
     my $cv = AnyEvent->condvar;
-    my %pool;
+    my (%pool, %status);
     my $w;
     $w = AnyEvent->signal(signal => 'INT', cb => sub {
         AE::log info => 'shutting down...';
@@ -167,27 +179,16 @@ sub run {
             },
         );
         $pool{ fileno($fh) } = $h;
+        $status{connections}++;
         $h->push_read(line => sub {
             my ($_h, $line, $eol) = @_;
             AE::log debug => '[from %s:%d] %s', $host, $port, $line;
-            my $url;
-            my ($verb, $peer_host, $peer_port, $proto);
+            my ($verb, $peer_host, $peer_port, $proto, $uri);
             if ($line =~ m{^CONNECT\s+([\w\.\-]+):([0-9]+)\s+(HTTP/1\.[01])$}ix) {
                 ($verb, $peer_host, $peer_port, $proto) = ('CONNECT', $1, $2, $3);
-            } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(?:https?)://([\w\.\-]+)(?::([0-9]+))?\S*\s+(HTTP/1\.[01])$}ix) {
-                ($verb, $peer_host, $peer_port, $proto) = (uc($1), $2, $3, $4);
-            } elsif ($line =~ m{^GET\s+/pid\s+HTTP/1\.[01]$}ix) {
-                AE::log info => 'status request from %s:%d', $host, $port;
-                $_h->push_write(
-                    'HTTP/1.0 200 OK' . $eol .
-                    'Cache-Control: no-cache' . $eol .
-                    'Connection: close' . $eol .
-                    'Content-Type: text/plain' . $eol . $eol .
-                    $$ . $eol
-                );
-                $_h->push_shutdown;
-                delete $pool{ fileno($fh) };
-                return;
+            } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(https?)://([\w\.\-]+)(?::([0-9]+))?(\S*)\s+(HTTP/1\.[01])$}ix) {
+                ($verb, my $scheme, $peer_host, $peer_port, $uri, $proto) = (uc($1), lc($2), $3, $4, $5, $6);
+                $peer_port ||= $scheme eq 'http' ? 80 : 443;
             } else {
                 AE::log error => 'bad request from %s:%d', $host, $port;
                 $_h->push_write(
@@ -201,13 +202,27 @@ sub run {
                 delete $pool{ fileno($fh) };
                 return;
             }
-
-            my $proxy = $je->{FindProxyForURL}->(
+            if ($peer_host eq 'depac') {
+                AE::log info => '%s request from %s:%d', $uri, $host, $port;
+                $status{pool} = keys %pool;
+                $_h->push_write(
+                    'HTTP/1.0 200 OK' . $eol .
+                    'Cache-Control: no-cache' . $eol .
+                    'Connection: close' . $eol .
+                    'Content-Type: text/plain' . $eol . $eol .
+                    {   '/pid'      => sub { $$ },
+                        '/status'   => sub { join $eol => map { $_ . "\t" . $status{$_} } sort keys %status },
+                    }->{ $uri }->() . $eol
+                );
+                $_h->push_shutdown;
+                delete $pool{ fileno($fh) };
+                return;
+            }
+            my $proxy = $je ? $je->{FindProxyForURL}->(
                 ($verb eq 'CONNECT' ? 'https' : 'http') . '://' . $peer_host, # HACK!
                 $peer_host,
-            );
+            ) : 'DIRECT';
             AE::log debug => 'WPAD says we should use %s', $proxy;
-
             my $peer_h;
             if ($proxy =~ m{^DIRECT\b}ix) {
                 AE::log debug => 'connecting directly to %s:%d', $peer_host, $peer_port;
@@ -223,17 +238,21 @@ sub run {
                                 $_h->push_write('HTTP/1.0 200 Connection established' . $eol . $eol);
                             });
                         } else {
-                            $line = join ' ', $verb, $url->path_query, $proto;
+                            $line = join ' ', $verb, $uri, $proto;
                             AE::log debug => '[to %s:%d] %s', $peer_host, $peer_port, $line;
                             $peer_h->push_write($line . $eol);
                         }
                         $_h->on_read(sub {
-                            AE::log trace => 'send %d bytes to %s:%d', length($_[0]->rbuf), $peer_host, $peer_port;
+                            my $l = length $_[0]->rbuf;
+                            $status{sent_bytes} += $l;
+                            AE::log trace => 'send %d bytes to %s:%d', $l, $peer_host, $peer_port;
                             $peer_h->push_write($_[0]->rbuf);
                             $_[0]->rbuf = '';
                         });
                         $peer_h->on_read(sub {
-                            AE::log trace => 'recv %d bytes from %s:%d', length($_[0]->rbuf), $peer_host, $peer_port;
+                            my $l = length $_[0]->rbuf;
+                            $status{recv_bytes} += $l;
+                            AE::log trace => 'recv %d bytes from %s:%d', $l, $peer_host, $peer_port;
                             $_h->push_write($_[0]->rbuf);
                             $_[0]->rbuf = '';
                         });
@@ -250,12 +269,16 @@ sub run {
                         AE::log debug => '[to %s:%d] %s', $proxy_host, $proxy_port, $line;
                         $peer_h->push_write($line . $eol);
                         $_h->on_read(sub {
-                            AE::log trace => 'send %d bytes to %s:%d', length($_[0]->rbuf), $proxy_host, $proxy_port;
+                            my $l = length $_[0]->rbuf;
+                            $status{sent_bytes} += $l;
+                            AE::log trace => 'send %d bytes to %s:%d', $l, $proxy_host, $proxy_port;
                             $peer_h->push_write($_[0]->rbuf);
                             $_[0]->rbuf = '';
                         });
                         $peer_h->on_read(sub {
-                            AE::log trace => 'recv %d bytes from %s:%d', length($_[0]->rbuf), $proxy_host, $proxy_port;
+                            my $l = length $_[0]->rbuf;
+                            $status{recv_bytes} += $l;
+                            AE::log trace => 'recv %d bytes from %s:%d', $l, $proxy_host, $proxy_port;
                             $_h->push_write($_[0]->rbuf);
                             $_[0]->rbuf = '';
                         });
@@ -275,14 +298,7 @@ sub _daemonize {
     POSIX::_exit(0) if $pid = fork;
     AE::log fatal => "couldn't fork: $@" unless defined $pid;
     POSIX::setsid();
-}
-
-sub _help {
-    print q(Usage: depac [options]
-    --bind_host ADDR     Accept connection at this host address (default: 127.0.0.1)
-    --bind_port PORT     Accept connection at this port (default: random port)
-    --wpad_file URL      Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
-);
+    return;
 }
 
 sub main {
@@ -300,7 +316,6 @@ sub main {
         'wpad_file=s'   => \$wpad_file,
     );
     _help && exit if $help;
-
     my $proxy;
     if (-e $env_file) {
         AE::log debug => 'checking previous environment at %s', $env_file;
@@ -308,7 +323,7 @@ sub main {
             || AE::log fatal => "can't read from %s: %s", $env_file, $@;
         my @env;
         while (my $line = <$fh>) {
-            $proxy = $1 if $line =~ m{^export\s+https?_proxy="(http://[\w\.\-]+:[0-9]+)"}isx;
+            $proxy = [$1, $2] if $line =~ m{^export\s+https?_proxy="http://([\w\.\-]+):([0-9]+)"}isx;
             push @env => $line;
         }
         close $fh;
@@ -324,7 +339,6 @@ sub main {
             exit;
         }
     }
-
     my $je = _process_wpad($wpad_file);
     my $cv = run($bind_host, $bind_port, $je, sub {
         my (undef, $this_host, $this_port) = @_;

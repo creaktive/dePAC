@@ -1,5 +1,5 @@
 #!/usr/bin/env perl
-use 5.010;
+use 5.010001;
 use strict;
 use warnings qw(all);
 
@@ -9,7 +9,6 @@ use Daemon::Generic;
 use IO::Socket;
 use JE;
 use Net::Domain;
-use URI;
 
 my $bind_host   = '127.0.0.1';
 my $bind_port   = 0;
@@ -113,10 +112,9 @@ sub _process_wpad {
         AE::log info => 'searching domain %s', $hostdomain;
         my @hostdomain = split m{\.}x, $hostdomain;
         while ($#hostdomain) {
-            my $wpad = URI->new('http://wpad.' . join('.', @hostdomain));
-            $wpad->path('/wpad.dat');
+            my $wpad = 'http://wpad.' . join('.', @hostdomain) . '/wpad.dat';
             AE::log info => 'fetching %s', $wpad;
-            http_get $wpad->canonical->as_string => sub {
+            http_get $wpad => sub {
                 my ($body, $hdr) = @_;
                 if (($hdr->{Status} != 200) || !length($body)) {
                     AE::log info => "couldn't GET %s", $wpad;
@@ -135,10 +133,9 @@ sub _process_wpad {
 }
 
 sub _ping_pid {
-    my ($proxy) = @_;
+    my ($url) = @_;
+    $url .= '/pid';
     my $cv = AnyEvent->condvar;
-    my $url = URI->new($proxy);
-    $url->path('/pid');
     AE::log info => 'pinging %s', $url;
     http_get $url->canonical->as_string,
         proxy   => undef,
@@ -188,9 +185,8 @@ sub gd_run {
             my ($verb, $peer_host, $peer_port, $proto);
             if ($line =~ m{^CONNECT\s+([\w\.\-]+):([0-9]+)\s+(HTTP/1\.[01])$}ix) {
                 ($verb, $peer_host, $peer_port, $proto) = ('CONNECT', $1, $2, $3);
-            } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(https?://.+)\s+(HTTP/1\.[01])$}ix) {
-                $url = URI->new($2);
-                ($verb, $peer_host, $peer_port, $proto) = (uc($1), $url->host, $url->port, $3);
+            } elsif ($line =~ m{^(DELETE|GET|HEAD|OPTIONS|POST|PUT|TRACE)\s+(?:https?)://([\w\.\-]+)(?::([0-9]+))?\S*\s+(HTTP/1\.[01])$}ix) {
+                ($verb, $peer_port, $peer_port, $proto) = (uc($1), $2, $3, $4);
             } elsif ($line =~ m{^GET\s+/pid\s+HTTP/1\.[01]$}ix) {
                 AE::log info => 'status request from %s:%d', $host, $port;
                 $_h->push_write(
@@ -318,8 +314,7 @@ sub gd_preconfig {
                 Proto           => 'tcp',
             )->sockport;
         }
-        my $proxy = URI->new('http://' . $bind_host);
-        $proxy->port($bind_port);
+        my $proxy = 'http://' . $bind_host . ':' $bind_port;
 
         AE::log info => 'writing environment proxy settings to %s', $envfile;
         my @env;

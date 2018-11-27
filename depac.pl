@@ -203,17 +203,29 @@ sub run {
                 return;
             }
             if ($peer_host eq 'depac') {
-                AE::log info => '%s request from %s:%d', $uri, $host, $port;
                 $status{pool} = keys %pool;
-                $_h->push_write(
-                    'HTTP/1.0 200 OK' . $eol .
-                    'Cache-Control: no-cache' . $eol .
-                    'Connection: close' . $eol .
-                    'Content-Type: text/plain' . $eol . $eol .
-                    {   '/pid'      => sub { $$ },
+                if (my $response = {
+                        '/pid'      => sub { $$ },
                         '/status'   => sub { join $eol => map { $_ . "\t" . $status{$_} } sort keys %status },
-                    }->{ $uri }->() . $eol
-                );
+                    }->{ $uri }) {
+                    AE::log info => '%s request from %s:%d (OK)', $uri, $host, $port;
+                    $_h->push_write(
+                        'HTTP/1.0 200 OK' . $eol .
+                        'Cache-Control: no-cache' . $eol .
+                        'Connection: close' . $eol .
+                        'Content-Type: text/plain' . $eol . $eol .
+                        $response->() . $eol
+                    );
+                } else {
+                    AE::log warn => '%s request from %s:%d (Not found)', $uri, $host, $port;
+                    $_h->push_write(
+                        'HTTP/1.0 404 Not found' . $eol .
+                        'Cache-Control: no-cache' . $eol .
+                        'Connection: close' . $eol .
+                        'Content-Type: text/html' . $eol . $eol .
+                        '<html><body><h1>404 Not found</h1></body></html>'
+                    );
+                }
                 $_h->push_shutdown;
                 delete $pool{ fileno($fh) };
                 return;

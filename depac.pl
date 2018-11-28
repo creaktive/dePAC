@@ -1,15 +1,15 @@
 #!/usr/bin/env perl
 use 5.010;
-use strict;
-use warnings qw(all);
-
-use AnyEvent::HTTP;
-use AnyEvent::Socket;
+# CORE dependencies
 use Getopt::Long;
 use IO::Socket;
-use JE;
 use Net::Domain;
 use POSIX;
+# external dependencies
+use common::sense;
+use AnyEvent::HTTP;
+use AnyEvent::Socket;
+use JE;
 
 main();
 

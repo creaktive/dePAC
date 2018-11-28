@@ -24,6 +24,7 @@ Usage: depac [options]
     --nodetach          Do not daemonize
     --help              This screen
     --stop              Guess what
+    --reload            Ditto
 
  * Add this line to your ~/.profile file to start the relay proxy in background
    and update HTTP_PROXY environment variables appropriately:
@@ -42,10 +43,10 @@ sub _validIP {
         && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255);
 }
 
+our %memoize;
 sub _process_wpad {
     my ($wpad_file) = @_;
     return () if $wpad_file && $wpad_file eq 'skip';
-    my %memoize;
     my $je = JE->new;
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
@@ -101,17 +102,17 @@ sub _process_wpad {
         };
     });
     my $cv = AnyEvent->condvar;
-    my $t = AnyEvent->timer(after => 1.0, cb => sub { $cv->send });
     if ($wpad_file) {
         AE::log info => 'fetching %s', $wpad_file;
         http_get $wpad_file,
             proxy => undef,
+            timeout => 1.0,
             sub {
                 my ($body, $hdr) = @_;
                 if (($hdr->{Status} != 200) || !length($body)) {
                     AE::log fatal => "couldn't GET %s", $wpad_file;
                 } else {
-                    $cv->send($body);
+                    $cv->send([$body, "$wpad_file"]);
                 }
             };
     } else {
@@ -121,24 +122,27 @@ sub _process_wpad {
         while ($#hostdomain) {
             my $wpad = 'http://wpad.' . join('.', @hostdomain) . '/wpad.dat';
             AE::log info => 'fetching %s', $wpad;
+            $cv->begin;
             http_get $wpad,
                 proxy => undef,
+                timeout => 1.0,
                 sub {
                     my ($body, $hdr) = @_;
+                    $cv->end;
                     if (($hdr->{Status} != 200) || !length($body)) {
-                        AE::log info => "couldn't GET %s", $wpad;
+                        AE::log debug => "couldn't GET %s", $wpad;
                     } else {
-                        $cv->send($body);
+                        $cv->send([$body, "$wpad"]);
                     }
                 };
             shift @hostdomain;
         }
     }
-    my $body = $cv->recv;
+    (my $body, $je->{last_working_wpad_file}) = @{ $cv->recv };
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
     $je->eval($body);
     AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
-
+    AE::log info => 'using WPAD %s', $je->{last_working_wpad_file};
     return $je;
 }
 
@@ -162,15 +166,32 @@ sub _ping_pid {
     return $cv->recv;
 }
 
+our ($sigint, $sighup); # keep the reference
 sub run {
     my ($bind_host, $bind_port, $je, $cb) = @_;
-    my $cv = AnyEvent->condvar;
     my (%pool, %status);
-    my $w;
-    $w = AnyEvent->signal(signal => 'INT', cb => sub {
-        AE::log info => 'shutting down...';
+    my $cv = AnyEvent->condvar;
+    $sighup = AnyEvent->signal(signal => 'HUP', cb => sub {
+        AE::log info => 'cleaning up caches...';
         %pool = ();
-        undef $w;
+        %status = ();
+        %memoize = ();
+        AE::log info => 'reprocessing WPAD %s', $je->{last_working_wpad_file};
+        http_get $je->{last_working_wpad_file},
+            proxy => undef,
+            timeout => 1.0,
+            sub {
+                my ($body, $hdr) = @_;
+                if (($hdr->{Status} != 200) || !length($body)) {
+                    AE::log fatal => "couldn't GET %s", $je->{last_working_wpad_file};
+                } else {
+                    $je->eval($body);
+                    AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
+                }
+            };
+    });
+    $sigint = AnyEvent->signal(signal => 'INT', cb => sub {
+        AE::log info => 'shutting down...';
         $cv->send;
     });
     tcp_server $bind_host, $bind_port, sub {
@@ -212,6 +233,7 @@ sub run {
                 return;
             }
             if ($peer_host eq 'depac') {
+                $status{cache} = keys %memoize;
                 $status{pool} = keys %pool;
                 if (my $response = {
                         '/pid'      => sub { $$ },
@@ -326,7 +348,7 @@ sub main {
     my $bind_host = '127.0.0.1';
     my $env_file = $ENV{HOME} . '/.depac.env';
     my $detach = 1;
-    my ($bind_port, $wpad_file, $help, $stop);
+    my ($bind_port, $wpad_file, $help, $stop, $reload);
     GetOptions(
         'bind_host=s'   => \$bind_host,
         'bind_port=i'   => \$bind_port,
@@ -334,6 +356,7 @@ sub main {
         'env_file=s'    => \$env_file,
         'help'          => \$help,
         'stop'          => \$stop,
+        'reload'        => \$reload,
         'wpad_file=s'   => \$wpad_file,
     );
     _help && exit if $help;
@@ -353,15 +376,20 @@ sub main {
         if (my $pid = _ping_pid($proxy)) {
             AE::log info => 'running proxy has PID %d', $pid;
             if ($stop) {
+                AE::log debug => 'sending SIGINT to PID %d', $pid;
                 kill INT => $pid;
+            } elsif ($reload) {
+                AE::log debug => 'sending SIGHUP to PID %d', $pid;
+                kill HUP => $pid;
             } else {
                 print for @env;
             }
             exit;
         }
     }
+    exit if $stop; # not running
     my $je = _process_wpad($wpad_file);
-    my $cv = run($bind_host, $bind_port, $je, sub {
+    run($bind_host, $bind_port, $je, sub {
         my (undef, $this_host, $this_port) = @_;
         my @env;
         AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;
@@ -370,12 +398,13 @@ sub main {
         push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
         push @env => qq(export $_="localhost,127.0.0.1"\n) for map { $_ => uc } qw(no_proxy);
         print for @env;
+        umask 077;
+        unlink $env_file;
         open(my $fh, '>', $env_file)
             || AE::log fatal => "can't write to %s: %s", $env_file, $@;
         print $fh $_ for @env;
         close $fh;
         _daemonize if $detach;
-    });
-    $cv->recv;
+    })->recv;
     exit;
 }

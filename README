@@ -1,3 +1,6 @@
+BEWARE: ALPHA QUALITY CODE!!! USE AT YOUR OWN RISK!!! PATCHES WELCOME!!!
+========================================================================
+
 Usage: depac [options]
     --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
     --bind_port PORT    Accept connection at this port (default: random port)

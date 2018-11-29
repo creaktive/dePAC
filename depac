@@ -16024,7 +16024,14 @@ JAVASCRIPT_ENGINE
 
 $fatpacked{"common/sense.pm"} = '#line '.(1+__LINE__).' "'.__FILE__."\"\n".<<'COMMON_SENSE';
   package common::sense;
-  1;
+  our$VERSION=3.74;
+  sub import{
+  local$^W;
+  ${^WARNING_BITS}^=${^WARNING_BITS}^"\x0c\x3f\x33\x00\x0f\xf0\x0f\xc0\xf0\xfc\x33\x00\x00\x00\x0c\x00\x00\x00";
+  $^H|=0x1c820fc0;
+  @^H{qw(feature_say feature_switch feature_evalbytes feature_unicode feature_fc feature___SUB__ feature_state)}=(1)x 7;
+  }
+  1
 COMMON_SENSE
 
 s/^  //mg for values %fatpacked;

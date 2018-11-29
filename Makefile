@@ -1,6 +1,6 @@
 # perl -MConfig -E 'say $Config{archname}'
 ARCH=darwin-thread-multi-2level
-WHITELIST=^(AnyEvent|JE)
+WHITELIST=^(AnyEvent|JE|common)
 MINIFY_PROC=4
 MINIFY_ARGS=--backup-and-modify-in-place \
 			--backup-file-extension=/ \
@@ -30,8 +30,6 @@ depac.packlists: depac.trace
 	fatpack packlists-for `egrep '$(WHITELIST)' depac.trace` > depac.packlists
 fatlib: depac.packlists
 	fatpack tree `cat depac.packlists`
-	mkdir fatlib/common/
-	echo "package common::sense;\n1;" > fatlib/common/sense.pm
 	cp -a fatlib/$(ARCH)/* fatlib/
 	rm -rf fatlib/$(ARCH)
 	mv fatlib/AnyEvent/constants.pl fatlib/AnyEvent/constants.pm

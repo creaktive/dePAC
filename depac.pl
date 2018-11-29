@@ -1,12 +1,13 @@
 #!/usr/bin/env perl
 use 5.010;
+use strict;
+use warnings qw(all);
 # CORE dependencies
 use Getopt::Long;
 use IO::Socket;
 use Net::Domain;
 use POSIX;
 # external dependencies
-use common::sense;
 use AnyEvent::HTTP;
 use AnyEvent::Socket;
 use JE;
@@ -16,20 +17,22 @@ main();
 sub _help {
     return print <<'END_HELP';
 Usage: depac [options]
-    --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
-    --bind_port PORT    Accept connection at this port (default: random port)
+    --help              This screen
+    --quiet             Suppress STDERR output
+    --stop              Stop the running instance
+    --reload            Reload the running instance
+    --status            Output the environment settings if an instance is running
     --wpad_file URL     Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
                         Alternatively: --wpad_file=skip to short-circuit the relay proxy
     --env_file FILE     File for environment persistence (default: ~/.depac.env)
     --nodetach          Do not daemonize
-    --help              This screen
-    --stop              Guess what
-    --reload            Ditto
+    --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
+    --bind_port PORT    Accept connection at this port (default: random port)
 
  * Add this line to your ~/.profile file to start the relay proxy in background
    and update HTTP_PROXY environment variables appropriately:
 
-    eval $(depac)
+    eval $(depac --quiet)
 
  * To gracefully terminate the relay proxy and unset HTTP_PROXY environment:
 
@@ -138,7 +141,7 @@ sub _process_wpad {
             shift @hostdomain;
         }
     }
-    (my $body, $je->{last_working_wpad_file}) = @{ $cv->recv };
+    (my $body, $je->{last_working_wpad_file}) = @{ $cv->recv || [''] };
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
     $je->eval($body);
     AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
@@ -348,18 +351,22 @@ sub main {
     my $bind_host = '127.0.0.1';
     my $env_file = $ENV{HOME} . '/.depac.env';
     my $detach = 1;
-    my ($bind_port, $wpad_file, $help, $stop, $reload);
+    my ($bind_port, $wpad_file, $help, $stop, $reload, $status, $quiet);
     GetOptions(
         'bind_host=s'   => \$bind_host,
         'bind_port=i'   => \$bind_port,
         'detach!'       => \$detach,
         'env_file=s'    => \$env_file,
         'help'          => \$help,
-        'stop'          => \$stop,
+        'quiet'         => \$quiet,
         'reload'        => \$reload,
+        'status'        => \$status,
+        'stop'          => \$stop,
         'wpad_file=s'   => \$wpad_file,
     );
     _help && exit if $help;
+    open(\*STDERR, '>', '/dev/null') || AE::log fatal => "dup stdout > stderr: $@"
+        if $quiet;
     my $proxy;
     if (-e $env_file) {
         AE::log debug => 'checking previous environment at %s', $env_file;
@@ -387,7 +394,7 @@ sub main {
             exit;
         }
     }
-    exit if $stop; # not running
+    exit if $status || $stop; # not running
     my $je = _process_wpad($wpad_file);
     run($bind_host, $bind_port, $je, sub {
         my (undef, $this_host, $this_port) = @_;

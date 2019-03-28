@@ -66,7 +66,7 @@ sub _process_wpad {
     });
     $je->new_function(dnsResolve => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            my $addr = inet_aton($_[0]);
+            my $addr = Socket::inet_aton($_[0]);
             $addr ? inet_ntoa($addr) : ();
         };
     });
@@ -74,7 +74,7 @@ sub _process_wpad {
         $memoize{ join('|', __LINE__, @_) } //= do {
             $_[0] = dnsResolve($_[0]) unless _validIP($_[0]);
             (!$_[0] || !_validIP($_[1]) || !_validIP($_[2]))
-                ? () : (inet_aton($_[0]) & inet_aton($_[2])) eq (inet_aton($_[1]) & inet_aton($_[2]));
+                ? () : (Socket::inet_aton($_[0]) & Socket::inet_aton($_[2])) eq (Socket::inet_aton($_[1]) & Socket::inet_aton($_[2]));
         };
     });
     $je->new_function(isPlainHostName => sub {
@@ -94,7 +94,7 @@ sub _process_wpad {
     });
     $je->new_function(myIpAddress => sub {
         $memoize{myIpAddress} //= do {
-            my $addr = inet_aton(Net::Domain::hostname);
+            my $addr = Socket::inet_aton(Net::Domain::hostname);
             $addr ? inet_ntoa($addr) : '127.0.0.1';
         };
     });

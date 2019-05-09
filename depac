@@ -12859,7 +12859,6 @@ sub main {
         $proxy = 'http://' . $this_host . ':' . $this_port;
         AE::log info => 'writing environment proxy settings to %s', $env_file;
         push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
-        push @env => qq(export $_="localhost,127.0.0.1"\n) for map { $_ => uc } qw(no_proxy);
         print for @env;
         umask 077;
         unlink $env_file;

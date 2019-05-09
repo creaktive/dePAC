@@ -12462,6 +12462,12 @@ Usage: depac [options]
     --nodetach          Do not daemonize
     --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
     --bind_port PORT    Accept connection at this port (default: random port)
+    --custom DEST,REGEX Custom routes AKA "poor man's WPAD"; overrides for the WPAD rules.
+                        DEST is the destination proxy address (or "direct"),
+                        REGEX is a regular expression that matches the hostname.
+                        Multiple custom routes can be defined adding --custom ...
+                        as much as necessary.
+                        Example: --custom '192.168.253.15:8080,dev\.company\.com$'
 
  * Add this line to your ~/.profile file to start the relay proxy in background
    and update HTTP_PROXY environment variables appropriately:
@@ -12605,7 +12611,7 @@ sub _ping_pid {
 
 our ($sigint, $sighup); # keep the reference
 sub run {
-    my ($bind_host, $bind_port, $je, $cb) = @_;
+    my ($bind_host, $bind_port, $je, $routes, $cb) = @_;
     my (%pool, %status);
     my $cv = AnyEvent->condvar;
     $sighup = AnyEvent->signal(signal => 'HUP', cb => sub {
@@ -12698,11 +12704,17 @@ sub run {
                 delete $pool{ fileno($fh) };
                 return;
             }
-            my $proxy = $je ? $je->{FindProxyForURL}->(
+
+            my ($proxy) = map {
+                ($peer_host =~ $_->[0]) ? $_->[1] : ()
+            } @$routes;
+            AE::log debug => 'overriding with %s', $proxy if $proxy;
+            $proxy ||= $je ? $je->{FindProxyForURL}->(
                 ($verb eq 'CONNECT' ? 'https' : 'http') . '://' . $peer_host, # HACK!
                 $peer_host,
             ) : 'DIRECT';
-            AE::log debug => 'WPAD says we should use %s', $proxy;
+            AE::log debug => 'selected proxy %s', $proxy;
+
             my $peer_h;
             if ($proxy =~ m{^DIRECT\b}ix) {
                 AE::log debug => 'connecting directly to %s:%d', $peer_host, $peer_port;
@@ -12785,7 +12797,7 @@ sub main {
     my $bind_host = '127.0.0.1';
     my $env_file = $ENV{HOME} . '/.depac.env';
     my $detach = 1;
-    my ($bind_port, $wpad_file, $help, $stop, $reload, $status, $quiet);
+    my ($bind_port, $wpad_file, $help, $stop, $reload, $status, $quiet, @custom);
     GetOptions(
         'bind_host=s'   => \$bind_host,
         'bind_port=i'   => \$bind_port,
@@ -12797,8 +12809,18 @@ sub main {
         'status'        => \$status,
         'stop'          => \$stop,
         'wpad_file=s'   => \$wpad_file,
+        'custom=s'      => \@custom,
     );
     _help && exit if $help;
+
+    my $routes = [];
+    for (@custom) {
+        my ($dest, $regex) = /^([\w\.:]+),(.+)$/x;
+        AE::log fatal => "Bad route: $_" if !$dest || !$regex;
+        AE::log debug => "Custom route [ qr/$regex/i => '\Q$dest\E' ]";
+        push @$routes => [ qr/$regex/i => $dest ];
+    }
+
     open(\*STDERR, '>', '/dev/null') || AE::log fatal => "dup stdout > stderr: $@"
         if $quiet;
     my $proxy;
@@ -12830,7 +12852,7 @@ sub main {
     }
     exit if $status || $stop; # not running
     my $je = _process_wpad($wpad_file);
-    run($bind_host, $bind_port, $je, sub {
+    run($bind_host, $bind_port, $je, $routes, sub {
         my (undef, $this_host, $this_port) = @_;
         my @env;
         AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;

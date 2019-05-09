@@ -32,7 +32,7 @@ fatlib: depac.packlists
 	fatpack tree `cat depac.packlists`
 	cp -a fatlib/$(ARCH)/* fatlib/
 	rm -rf fatlib/$(ARCH)
-	mv fatlib/AnyEvent/constants.pl fatlib/AnyEvent/constants.pm
+	cp AnyEvent/constants.pm fatlib/AnyEvent/constants.pm
 	perl -i.bak -pe 's{(AnyEvent/constants)\.pl}{\1.pm}' fatlib/AnyEvent.pm
 fatlib/.minified: fatlib
 	find fatlib/ -type f -name \*.pm | xargs -P $(MINIFY_PROC) perltidy $(MINIFY_ARGS)
@@ -44,3 +44,7 @@ clean:
 	rm -rf depac depac.trace depac.packlists fatlib/
 deps:
 	cpan -i App::FatPacker Perl::Tidy
+fast:
+	git checkout origin/master depac
+	git diff origin/master depac.pl | sed 's/depac\.pl/depac/' | patch -p1
+	rm depac.orig

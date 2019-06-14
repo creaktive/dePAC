@@ -150,7 +150,7 @@ sub _process_wpad {
     (my $body, $je->{last_working_wpad_file}) = @{ $cv->recv || [''] };
     AE::log fatal => "COULDN'T FIND WPAD" unless $body;
     $je->eval($body);
-    AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
+    AE::log fatal => "COULDN'T EVALUATE WPAD: $@" if $@;
     AE::log info => 'using WPAD %s', $je->{last_working_wpad_file};
     return $je;
 }
@@ -195,7 +195,7 @@ sub run {
                     AE::log fatal => "couldn't GET %s", $je->{last_working_wpad_file};
                 } else {
                     $je->eval($body);
-                    AE::log fatal => "COULDN'T EVALUATE WPAD" if $@;
+                    AE::log fatal => "COULDN'T EVALUATE WPAD: $@" if $@;
                 }
             };
     });

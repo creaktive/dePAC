@@ -12443,6 +12443,7 @@ use Net::Domain;
 use POSIX;
 # external dependencies
 use AnyEvent::HTTP;
+use AnyEvent::Log;
 use AnyEvent::Socket;
 use JE;
 
@@ -12452,13 +12453,14 @@ sub _help {
     return print <<'END_HELP';
 Usage: depac [options]
     --help              This screen
-    --quiet             Suppress STDERR output
     --stop              Stop the running instance
     --reload            Reload the running instance
     --status            Output the environment settings if an instance is running
     --wpad_file URL     Manually specify the URL of the "wpad.dat" file (default: DNS autodiscovery)
                         Alternatively: --wpad_file=skip to short-circuit the relay proxy
     --env_file FILE     File for environment persistence (default: ~/.depac.env)
+    --log_file FILE     File for the log (default: ~/.depac.log; /dev/null to disable :)
+    --log_level LEVEL   fatal/warn/info/debug/trace (default: warn)
     --nodetach          Do not daemonize
     --bind_host ADDR    Accept connection at this host address (default: 127.0.0.1)
     --bind_port PORT    Accept connection at this port (default: random port)
@@ -12472,7 +12474,7 @@ Usage: depac [options]
  * Add this line to your ~/.profile file to start the relay proxy in background
    and update HTTP_PROXY environment variables appropriately:
 
-    eval $(depac --quiet)
+    eval $(depac)
 
  * To gracefully terminate the relay proxy and unset HTTP_PROXY environment:
 
@@ -12491,6 +12493,13 @@ sub _process_wpad {
     my ($wpad_file) = @_;
     return () if $wpad_file && $wpad_file eq 'skip';
     my $je = JE->new;
+    for my $stub (qw(alert weekDayRange dateRange timeRange)) {
+        $je->new_function($stub => sub {
+            AE::log warn => 'WPAD CALLED: %s("%s")',
+                $stub,
+                join '","', map { quotemeta } @_;
+        });
+    }
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
             my $host_len = length $_[0];
@@ -12663,7 +12672,7 @@ sub run {
                 ($verb, my $scheme, $peer_host, $peer_port, $uri, $proto) = (uc($1), lc($2), $3, $4, $5, $6);
                 $peer_port ||= $scheme eq 'http' ? 80 : 443;
             } else {
-                AE::log error => 'bad request from %s:%d', $host, $port;
+                AE::log warn => 'bad request from %s:%d', $host, $port;
                 $_h->push_write(
                     'HTTP/1.0 400 Bad request' . $eol .
                     'Cache-Control: no-cache' . $eol .
@@ -12796,15 +12805,18 @@ sub _daemonize {
 sub main {
     my $bind_host = '127.0.0.1';
     my $env_file = $ENV{HOME} . '/.depac.env';
+    my $log_file = $ENV{HOME} . '/.depac.log';
+    my $log_level = 'warn';
     my $detach = 1;
-    my ($bind_port, $wpad_file, $help, $stop, $reload, $status, $quiet, @custom);
+    my ($bind_port, $wpad_file, $help, $stop, $reload, $status, @custom);
     GetOptions(
         'bind_host=s'   => \$bind_host,
         'bind_port=i'   => \$bind_port,
         'detach!'       => \$detach,
         'env_file=s'    => \$env_file,
+        'log_file=s'    => \$log_file,
+        'log_level=s'   => \$log_level,
         'help'          => \$help,
-        'quiet'         => \$quiet,
         'reload'        => \$reload,
         'status'        => \$status,
         'stop'          => \$stop,
@@ -12813,16 +12825,19 @@ sub main {
     );
     _help && exit if $help;
 
+    $AnyEvent::Log::FILTER->level($log_level);
+    $AnyEvent::Log::FILTER->attach(AnyEvent::Log::Ctx->new(
+        log_to_file => $log_file,
+    ));
+
     my $routes = [];
     for (@custom) {
         my ($dest, $regex) = /^([\w\.:]+),(.+)$/x;
         AE::log fatal => "Bad route: $_" if !$dest || !$regex;
-        AE::log debug => "Custom route [ qr/$regex/i => '\Q$dest\E' ]";
-        push @$routes => [ qr/$regex/i => $dest ];
+        AE::log debug => 'Custom route [ qr/%s/ix => "%s" ]', $regex, quotemeta $dest;
+        push @$routes => [ qr/$regex/ix => $dest ];
     }
 
-    open(\*STDERR, '>', '/dev/null') || AE::log fatal => "dup stdout > stderr: $@"
-        if $quiet;
     my $proxy;
     if (-e $env_file) {
         AE::log debug => 'checking previous environment at %s', $env_file;

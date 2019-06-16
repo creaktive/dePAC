@@ -14,6 +14,11 @@ ALPHA QUALITY CODE!!! USE AT YOUR OWN RISK!!! PATCHES WELCOME!!!
     export https_proxy="http://127.0.0.1:56538"
     export HTTPS_PROXY="http://127.0.0.1:56538"
 
+    $ eval $(depac)
+
+    $ echo $http_proxy
+    http://127.0.0.1:56538
+
     $ curl depac/status
     cache   1337
     connections     43515
@@ -24,6 +29,8 @@ ALPHA QUALITY CODE!!! USE AT YOUR OWN RISK!!! PATCHES WELCOME!!!
     unset HTTP_PROXY
     unset https_proxy
     unset HTTPS_PROXY
+
+    $ eval $(depac --stop)
 
 # DESCRIPTION
 
@@ -63,9 +70,21 @@ previous paragraph was stolen from `ssh-agent` manual page :)
 
 The biggest advantage of `depac` in comparison to the similar solutions like
 [pac4cli](https://github.com/tkluck/pac4cli) is that the former does not require
-installation. Both the JavaScript engine *and* the relay proxy are implemented
-in pure Perl language and require no dependencies except for Perl v5.10 itself
-(which is omnipresent anyway).
+a system-wide installation. Both the JavaScript engine *and* the relay proxy are
+implemented in pure Perl language and require no dependencies except for
+Perl v5.10 itself (which is omnipresent anyway).
+
+# INSTALLATION
+
+$ curl -o ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
+$ chmod +x ~/bin/depac
+$ echo 'eval $(~/bin/depac)' >> ~/.profile
+
+Or:
+
+$ wget -O ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
+$ chmod +x ~/bin/depac
+$ echo 'eval $(~/bin/depac)' >> ~/.profile
 
 # USAGE
 

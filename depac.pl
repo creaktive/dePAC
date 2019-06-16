@@ -64,6 +64,7 @@ sub _process_wpad {
             AE::log warn => 'WPAD CALLED: %s("%s")',
                 $stub,
                 join '","', map { quotemeta } @_;
+            return;
         });
     }
     $je->new_function(dnsDomainIs => sub {
@@ -189,7 +190,7 @@ sub run {
     my ($bind_host, $bind_port, $je, $routes, $cb) = @_;
     my (%pool, %status);
     my $cv = AnyEvent->condvar;
-    $sighup = AnyEvent->signal(signal => 'HUP', cb => sub {
+    my $reload = sub {
         AE::log info => 'cleaning up caches...';
         %pool = ();
         %status = ();
@@ -207,7 +208,8 @@ sub run {
                     AE::log fatal => "COULDN'T EVALUATE WPAD: $@" if $@;
                 }
             };
-    });
+    };
+    $sighup = AnyEvent->signal(signal => 'HUP', cb => $reload);
     $sigint = AnyEvent->signal(signal => 'INT', cb => sub {
         AE::log info => 'shutting down...';
         $cv->send;
@@ -256,6 +258,7 @@ sub run {
                 if (my $response = {
                         '/pid'      => sub { $$ },
                         '/status'   => sub { join $eol => map { $_ . "\t" . $status{$_} } sort keys %status },
+                        '/reload'   => sub { $reload->(); $je->{last_working_wpad_file} },
                     }->{ $uri }) {
                     AE::log info => '%s request from %s:%d (OK)', $uri, $host, $port;
                     $_h->push_write(
@@ -391,6 +394,8 @@ sub main {
     );
     _help && exit if $help;
 
+    umask 077;
+
     $AnyEvent::Log::FILTER->level($log_level);
     $AnyEvent::Log::FILTER->attach(AnyEvent::Log::Ctx->new(
         log_to_file => $log_file,
@@ -422,6 +427,7 @@ sub main {
             if ($stop) {
                 AE::log debug => 'sending SIGINT to PID %d', $pid;
                 kill INT => $pid;
+                print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
             } elsif ($reload) {
                 AE::log debug => 'sending SIGHUP to PID %d', $pid;
                 kill HUP => $pid;
@@ -441,7 +447,6 @@ sub main {
         AE::log info => 'writing environment proxy settings to %s', $env_file;
         push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
         print for @env;
-        umask 077;
         unlink $env_file;
         open(my $fh, '>', $env_file)
             || AE::log fatal => "can't write to %s: %s", $env_file, $@;

@@ -76,15 +76,15 @@ Perl v5.10 itself (which is omnipresent anyway).
 
 # INSTALLATION
 
-$ curl -o ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
-$ chmod +x ~/bin/depac
-$ echo 'eval $(~/bin/depac)' >> ~/.profile
+    $ curl -o ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
+    $ chmod +x ~/bin/depac
+    $ echo 'eval $(~/bin/depac)' >> ~/.profile
 
 Or:
 
-$ wget -O ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
-$ chmod +x ~/bin/depac
-$ echo 'eval $(~/bin/depac)' >> ~/.profile
+    $ wget -O ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
+    $ chmod +x ~/bin/depac
+    $ echo 'eval $(~/bin/depac)' >> ~/.profile
 
 # USAGE
 

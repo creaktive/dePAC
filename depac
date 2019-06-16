@@ -12861,7 +12861,6 @@ sub main {
             if ($stop) {
                 AE::log debug => 'sending SIGINT to PID %d', $pid;
                 kill INT => $pid;
-                print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
             } elsif ($reload) {
                 AE::log debug => 'sending SIGHUP to PID %d', $pid;
                 kill HUP => $pid;
@@ -12871,7 +12870,13 @@ sub main {
             exit;
         }
     }
-    exit if $status || $stop; # not running
+    if ($stop) {
+        print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
+        exit;
+    } elsif ($status) {
+        # not running
+        exit;
+    }
     my $je = _process_wpad($wpad_file);
     run($bind_host, $bind_port, $je, $routes, sub {
         my (undef, $this_host, $this_port) = @_;

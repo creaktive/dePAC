@@ -80,11 +80,10 @@ Perl v5.10 itself (which is omnipresent anyway).
     $ chmod +x ~/bin/depac
     $ echo 'eval $(~/bin/depac)' >> ~/.profile
 
-Or:
+Or you can use `wget` and call it with `perl` (feel free to mix):
 
-    $ wget -O ~/bin/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
-    $ chmod +x ~/bin/depac
-    $ echo 'eval $(~/bin/depac)' >> ~/.profile
+    $ wget -O ~/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
+    $ echo 'eval $(perl ~/depac)' >> ~/.profile
 
 # USAGE
 
@@ -127,6 +126,9 @@ Or:
    for performance reasons the `url` parameter is the same as `host`
  - The mappings are heavily cached, do run `depac --reload`
    (or `pkill -HUP -f depac`) if the connections start failing
+ - `depac` has 300KB of text at the time of writing, because of all the
+   libraries bundled with it. The actual source code is `depac.pl`. To use it
+   instead, install the Perl dependencies with `cpanm AnyEvent::HTTP JE`
 
 # SEE ALSO
 

@@ -427,6 +427,7 @@ sub main {
             if ($stop) {
                 AE::log debug => 'sending SIGINT to PID %d', $pid;
                 kill INT => $pid;
+                print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
             } elsif ($reload) {
                 AE::log debug => 'sending SIGHUP to PID %d', $pid;
                 kill HUP => $pid;

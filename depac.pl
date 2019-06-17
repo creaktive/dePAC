@@ -123,18 +123,26 @@ sub _process_wpad {
     });
     my $cv = AnyEvent->condvar;
     if ($wpad_file) {
-        AE::log info => 'fetching %s', $wpad_file;
-        http_get $wpad_file,
-            proxy => undef,
-            timeout => 1.0,
-            sub {
-                my ($body, $hdr) = @_;
-                if (($hdr->{Status} != 200) || !length($body)) {
-                    AE::log fatal => "couldn't GET %s", $wpad_file;
-                } else {
-                    $cv->send([$body, "$wpad_file"]);
-                }
-            };
+        if (open(my $fh, '<', $wpad_file)) {
+            AE::log info => 'reading local file %s', $wpad_file;
+            local $/ = undef;
+            my $body = <$fh>;
+            close $fh;
+            $cv->send([$body, "$wpad_file"]);
+        } else {
+            AE::log info => 'fetching resource %s', $wpad_file;
+            http_get $wpad_file,
+                proxy => undef,
+                timeout => 1.0,
+                sub {
+                    my ($body, $hdr) = @_;
+                    if (($hdr->{Status} != 200) || !length($body)) {
+                        AE::log fatal => "couldn't GET %s", $wpad_file;
+                    } else {
+                        $cv->send([$body, "$wpad_file"]);
+                    }
+                };
+        }
     } else {
         my $hostdomain  = Net::Domain::hostdomain;
         AE::log info => 'searching domain %s', $hostdomain;

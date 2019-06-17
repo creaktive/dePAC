@@ -12503,8 +12503,6 @@ sub _process_wpad {
     }
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            my $host_len = length $_[0];
-            my $domain_len = length $_[1];
             my $d = length($_[0]) - length($_[1]);
             ($d >= 0) && (substr($_[0], $d) eq $_[1]);
         };
@@ -12550,24 +12548,35 @@ sub _process_wpad {
     });
     $je->new_function(shExpMatch => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            $_[1] =~ s{ \* }{.*?}gx;
-            !!($_[0] =~ m{$_[1]}ix);
+            my ($str, $shExp) = @_;
+            $shExp =~ s{ \. }{\.}gx;
+            $shExp =~ s{ \? }{.}gx;
+            $shExp =~ s{ \* }{.*?}gx;
+            !!($str =~ m{^ $shExp $}ix);
         };
     });
     my $cv = AnyEvent->condvar;
     if ($wpad_file) {
-        AE::log info => 'fetching %s', $wpad_file;
-        http_get $wpad_file,
-            proxy => undef,
-            timeout => 1.0,
-            sub {
-                my ($body, $hdr) = @_;
-                if (($hdr->{Status} != 200) || !length($body)) {
-                    AE::log fatal => "couldn't GET %s", $wpad_file;
-                } else {
-                    $cv->send([$body, "$wpad_file"]);
-                }
-            };
+        if (open(my $fh, '<', $wpad_file)) {
+            AE::log info => 'reading local file %s', $wpad_file;
+            local $/ = undef;
+            my $body = <$fh>;
+            close $fh;
+            $cv->send([$body, "$wpad_file"]);
+        } else {
+            AE::log info => 'fetching resource %s', $wpad_file;
+            http_get $wpad_file,
+                proxy => undef,
+                timeout => 1.0,
+                sub {
+                    my ($body, $hdr) = @_;
+                    if (($hdr->{Status} != 200) || !length($body)) {
+                        AE::log fatal => "couldn't GET %s", $wpad_file;
+                    } else {
+                        $cv->send([$body, "$wpad_file"]);
+                    }
+                };
+        }
     } else {
         my $hostdomain  = Net::Domain::hostdomain;
         AE::log info => 'searching domain %s', $hostdomain;

@@ -114,8 +114,11 @@ sub _process_wpad {
     });
     $je->new_function(shExpMatch => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            $_[1] =~ s{ \* }{.*?}gx;
-            !!($_[0] =~ m{$_[1]}ix);
+            my ($str, $shExp) = @_;
+            $shExp =~ s{ \. }{\.}gx;
+            $shExp =~ s{ \? }{.}gx;
+            $shExp =~ s{ \* }{.*?}gx;
+            !!($str =~ m{^ $shExp $}ix);
         };
     });
     my $cv = AnyEvent->condvar;

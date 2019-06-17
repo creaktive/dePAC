@@ -69,8 +69,6 @@ sub _process_wpad {
     }
     $je->new_function(dnsDomainIs => sub {
         $memoize{ join('|', __LINE__, @_) } //= do {
-            my $host_len = length $_[0];
-            my $domain_len = length $_[1];
             my $d = length($_[0]) - length($_[1]);
             ($d >= 0) && (substr($_[0], $d) eq $_[1]);
         };

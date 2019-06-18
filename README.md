@@ -4,31 +4,26 @@ dePAC - portable CLI solution for Proxy Auto-Config
 
 # VERSION
 
-ALPHA QUALITY CODE!!! USE AT YOUR OWN RISK!!! PATCHES WELCOME!!!
+BETA QUALITY CODE!!! USE AT YOUR OWN RISK!!! PATCHES WELCOME!!!
 
 # SYNOPSIS
 
-    $ depac
-    export http_proxy="http://127.0.0.1:56538"
-    export HTTP_PROXY="http://127.0.0.1:56538"
-    export https_proxy="http://127.0.0.1:56538"
-    export HTTPS_PROXY="http://127.0.0.1:56538"
+    # Wrap the command so it runs through the auto-detected proxy:
+    $ depac curl whatismyip.akamai.com
+    112.165.140.6
 
+    # Or run as a daemon, for all the processes sharing the user environment:
     $ eval $(depac)
 
     $ echo $http_proxy
     http://127.0.0.1:56538
 
     $ curl depac/status
-    cache   1337
-    connections     43515
+    cache   1495
+    connections     14
     pool    1
-
-    $ depac --stop
-    unset http_proxy
-    unset HTTP_PROXY
-    unset https_proxy
-    unset HTTPS_PROXY
+    recv_bytes      2418844
+    sent_bytes      9077
 
     $ eval $(depac --stop)
 
@@ -85,9 +80,14 @@ Or you can use `wget` and call it with `perl` (feel free to mix):
     $ wget -O ~/depac https://raw.githubusercontent.com/creaktive/dePAC/master/depac
     $ echo 'eval $(perl ~/depac)' >> ~/.profile
 
+You can also use `depac` in an ad-hoc fashion, without a shared instance running
+in the background:
+
+    $ depac -- wget -r -np https://something.com
+
 # USAGE
 
-    Usage: depac [options]
+    Usage: depac [options] [command]
         --help              This screen
         --stop              Stop the running instance
         --reload            Reload the running instance
@@ -106,6 +106,10 @@ Or you can use `wget` and call it with `perl` (feel free to mix):
                             Multiple custom routes can be defined adding --custom ...
                             as much as necessary.
                             Example: --custom '192.168.253.15:8080,dev\.company\.com$'
+
+     * To run a single process through the relay proxy:
+
+        depac curl ifconfig.me/all
 
      * Add this line to your ~/.profile file to start the relay proxy in background
        and update HTTP_PROXY environment variables appropriately:
@@ -129,6 +133,8 @@ Or you can use `wget` and call it with `perl` (feel free to mix):
  - `depac` has 300KB of text at the time of writing, because of all the
    libraries bundled with it. The actual source code is `depac.pl`. To use it
    instead, install the Perl dependencies with `cpanm AnyEvent::HTTP JE`
+ - *Security!* There's close to none. Shouldn't be much more exploitable than
+   a regular GUI browser with an outdated JavaScript engine, tho
 
 # SEE ALSO
 

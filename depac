@@ -12445,13 +12445,14 @@ use POSIX;
 use AnyEvent::HTTP;
 use AnyEvent::Log;
 use AnyEvent::Socket;
+use AnyEvent::Util;
 use JE;
 
 main();
 
 sub _help {
     return print <<'END_HELP';
-Usage: depac [options]
+Usage: depac [options] [command]
     --help              This screen
     --stop              Stop the running instance
     --reload            Reload the running instance
@@ -12470,6 +12471,10 @@ Usage: depac [options]
                         Multiple custom routes can be defined adding --custom ...
                         as much as necessary.
                         Example: --custom '192.168.253.15:8080,dev\.company\.com$'
+
+ * To run a single process through the relay proxy:
+
+    depac curl ifconfig.me/all
 
  * Add this line to your ~/.profile file to start the relay proxy in background
    and update HTTP_PROXY environment variables appropriately:
@@ -12491,7 +12496,6 @@ sub _validIP {
 our %memoize;
 sub _process_wpad {
     my ($wpad_file) = @_;
-    return () if $wpad_file && $wpad_file eq 'skip';
     my $je = JE->new;
     for my $stub (qw(alert weekDayRange dateRange timeRange)) {
         $je->new_function($stub => sub {
@@ -12852,56 +12856,75 @@ sub main {
         push @$routes => [ qr/$regex/ix => $dest ];
     }
 
-    my $proxy;
-    if (-e $env_file) {
-        AE::log debug => 'checking previous environment at %s', $env_file;
-        open(my $fh, '<', $env_file)
-            || AE::log fatal => "can't read from %s: %s", $env_file, $@;
-        my @env;
-        while (my $line = <$fh>) {
-            $proxy = [$1, $2] if $line =~ m{^export\s+https?_proxy="http://([\w\.\-]+):([0-9]+)"}isx;
-            push @env => $line;
-        }
-        close $fh;
-        AE::log fatal => "couldn't find running process address in %s", $env_file
-            unless $proxy;
-        if (my $pid = _ping_pid($proxy)) {
-            AE::log info => 'running proxy has PID %d', $pid;
-            if ($stop) {
-                AE::log debug => 'sending SIGINT to PID %d', $pid;
-                kill INT => $pid;
-                print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
-            } elsif ($reload) {
-                AE::log debug => 'sending SIGHUP to PID %d', $pid;
-                kill HUP => $pid;
-            } else {
-                print for @env;
+    if (@ARGV) {
+        my $je = _process_wpad($wpad_file);
+        my ($relay, $command);
+        $relay = run($bind_host, $bind_port, $je, $routes, sub {
+            my (undef, $this_host, $this_port) = @_;
+            AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;
+            $ENV{$_} = 'http://' . $this_host . ':' . $this_port
+                for map { $_ => uc } qw(http_proxy https_proxy);
+            AE::log info => 'STARTING THE COMMAND: %s', join ' ', @ARGV;
+            $command = run_cmd [@ARGV];
+            $command->cb(sub {
+                my $exit = shift->recv;
+                AE::log info => 'COMMAND EXITED WITH CODE %d', $exit;
+                $relay->send;
+            });
+        });
+        $relay->recv;
+    } else {
+        my $proxy;
+        if (-e $env_file) {
+            AE::log debug => 'checking previous environment at %s', $env_file;
+            open(my $fh, '<', $env_file)
+                || AE::log fatal => "can't read from %s: %s", $env_file, $@;
+            my @env;
+            while (my $line = <$fh>) {
+                $proxy = [$1, $2] if $line =~ m{^export\s+https?_proxy="http://([\w\.\-]+):([0-9]+)"}isx;
+                push @env => $line;
             }
+            close $fh;
+            AE::log fatal => "couldn't find running process address in %s", $env_file
+                unless $proxy;
+            if (my $pid = _ping_pid($proxy)) {
+                AE::log info => 'running proxy has PID %d', $pid;
+                if ($stop) {
+                    AE::log debug => 'sending SIGINT to PID %d', $pid;
+                    kill INT => $pid;
+                    print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
+                } elsif ($reload) {
+                    AE::log debug => 'sending SIGHUP to PID %d', $pid;
+                    kill HUP => $pid;
+                } else {
+                    print for @env;
+                }
+                exit;
+            }
+        }
+        if ($stop) {
+            print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
+            exit;
+        } elsif ($status) {
+            # not running
             exit;
         }
+        my $je = _process_wpad($wpad_file);
+        run($bind_host, $bind_port, $je, $routes, sub {
+            my (undef, $this_host, $this_port) = @_;
+            my @env;
+            AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;
+            $proxy = 'http://' . $this_host . ':' . $this_port;
+            AE::log info => 'writing environment proxy settings to %s', $env_file;
+            push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
+            print for @env;
+            unlink $env_file;
+            open(my $fh, '>', $env_file)
+                || AE::log fatal => "can't write to %s: %s", $env_file, $@;
+            print $fh $_ for @env;
+            close $fh;
+            _daemonize if $detach;
+        })->recv;
     }
-    if ($stop) {
-        print qq(unset $_\n) for map { $_ => uc } qw(http_proxy https_proxy);
-        exit;
-    } elsif ($status) {
-        # not running
-        exit;
-    }
-    my $je = _process_wpad($wpad_file);
-    run($bind_host, $bind_port, $je, $routes, sub {
-        my (undef, $this_host, $this_port) = @_;
-        my @env;
-        AE::log info => 'STARTED THE SERVER AT %s:%d', $this_host, $this_port;
-        $proxy = 'http://' . $this_host . ':' . $this_port;
-        AE::log info => 'writing environment proxy settings to %s', $env_file;
-        push @env => qq(export $_="$proxy"\n) for map { $_ => uc } qw(http_proxy https_proxy);
-        print for @env;
-        unlink $env_file;
-        open(my $fh, '>', $env_file)
-            || AE::log fatal => "can't write to %s: %s", $env_file, $@;
-        print $fh $_ for @env;
-        close $fh;
-        _daemonize if $detach;
-    })->recv;
     exit;
 }
